@@ -7,6 +7,20 @@
  *
  * Resposta:
  *   { "status": "waiting_paid" }  ou  { "status": "paid" }
+ *
+ * IMPORTANTE: este endpoint é somente leitura. Ele NUNCA consulta o PSP nem
+ * dispara eventos de compra (Facebook/UTMify) — isso é feito exclusivamente
+ * por webhook_pix.php, chamado pelo BASSPAGO quando o PIX é pago de fato.
+ *
+ * Antes, este arquivo também confirmava o pagamento e disparava
+ * Tracker::purchase() por conta própria a cada poll do navegador (a cada
+ * 5s). Isso criava uma segunda rota, concorrente com o webhook, mandando
+ * "paid" para a UTMify para o mesmo orderId. Como a UTMify atualiza o
+ * pedido pelo orderId, a última chamada que chegava vencia — e se o poll do
+ * navegador disparasse com os dados de UTM ainda incompletos (por exemplo,
+ * por uma leitura do Upstash feita antes do registro terminar de salvar),
+ * ele sobrescrevia a campanha correta que o webhook já tinha enviado.
+ * Reduzir este endpoint a uma simples leitura elimina essa corrida.
  */
 
 error_reporting(E_ALL & ~E_WARNING & ~E_NOTICE & ~E_DEPRECATED);
@@ -27,14 +41,17 @@ if (empty($txid)) {
 try {
     $data = (new TransactionStore())->carregar($txid);
 } catch (Throwable $e) {
+    error_log('[verificar_pagamento] Upstash indisponivel: ' . $e->getMessage());
     http_response_code(500);
     echo json_encode(['erro' => 'Erro ao consultar transação.']);
     exit;
 }
 
 if (empty($data)) {
-    http_response_code(404);
-    echo json_encode(['erro' => 'Transação não encontrada.']);
+    // Ainda não existe registro (ex.: PIX acabou de ser criado, ou a
+    // gravação inicial no Upstash falhou). Não é erro do ponto de vista do
+    // checkout — o webhook ainda vai confirmar quando o PIX for pago.
+    echo json_encode(['txid' => $txid, 'status' => 'waiting_paid']);
     exit;
 }
 
